@@ -161,7 +161,6 @@ export async function tiff2nii(inBuffer, isVerbose = false) {
         // Create NIfTI header
         const hdr = new nifti.NIFTI1()
         hdr.littleEndian = true
-        console.log(nFrames, sizeZ, sizeT, sizeC)
         hdr.dims = [3, width, height, nFrames, 0, 0, 0, 0]
         if ((sizeZ * sizeT * sizeC === nFrames) && (nFrames > 1)) {
             hdr.dims[0] = 4
