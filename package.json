@@ -1,0 +1,33 @@
+{
+  "name": "@niivue/tiff-loader",
+  "version": "0.1.0",
+  "main": "src/loader.js",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/niivue/tiff-loader.git"
+  },
+  "files": [
+    "src/loader.js"
+  ],
+  "scripts": {
+    "test": "vitest"
+  },
+  "keywords": [
+    "nii",
+    "tiff",
+    "loader",
+    "tif",
+    "niivue"
+  ],
+  "author": "NiiVue developers",
+  "license": "BSD-2-Clause",
+  "description": "",
+  "dependencies": {
+    "image-js": "^0.36.0",
+    "nifti-reader-js": "^0.6.8"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.8"
+  }
+}
