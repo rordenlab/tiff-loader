@@ -1,6 +1,6 @@
-import { Image } from 'image-js'
+import { fromArrayBuffer } from 'geotiff'
 import * as nifti from 'nifti-reader-js'
-
+import { DOMParser } from 'xmldom'
 // n.b. : largely duplicates of /nvimage/utils.ts but avoids dependency
 function str2BufferX(str, maxLen) {
   // emulate node.js Buffer.from
@@ -89,110 +89,155 @@ function hdrToArrayBufferX(hdr) {
   return byteArray
 }
 
-export async function tiff2nii(arrayBuffer, verbose = false) {
+export async function tiff2nii(inBuffer, isVerbose = false) {
     try {
-        // Load the image using image-js
-        const imagesX = await Image.load(arrayBuffer)
-        let images
-        if (Array.isArray(imagesX)) {
-            images = imagesX // Use directly if it's an array
-        } else {
-            images = [imagesX] // Wrap in an array if it's a single image
+        // Load the TIFF using geotiff.js
+        let arrayBuffer = inBuffer
+        if (Buffer.isBuffer(inBuffer)) {
+          arrayBuffer = inBuffer.buffer.slice(inBuffer.byteOffset, inBuffer.byteOffset + inBuffer.byteLength)
         }
-        const n3x4 = images.length
-        const image = images[0]
-        let maxValue = image.maxValue
-        for (let i = 0; i < n3x4 ; i++) {
-          if (image.width !== images[i].width)
-            throw new Error("Width varies across slices in the 3D TIFF.")
-          if (image.height !== images[i].height)
-            throw new Error("Height varies across slices in the 3D TIFF.")
-          if (image.bitDepth !== images[i].bitDepth)
-            throw new Error("BitDepth varies across slices in the 3D TIFF.")
-          if (image.bitDepth !== images[i].bitDepth)
-            throw new Error("BitDepth varies across slices in the 3D TIFF.")
-          if (image.components !== images[i].components)
-            throw new Error("Components varies across slices in the 3D TIFF.")
-          maxValue = Math.max(maxValue, images[i].maxValue)
-        } //for each slice
-        function extractSlicesAndFrames(imageDescription) {
-          //read ImageJ specific image description
-          if (!imageDescription) return { slices: 1, frames: 1 }
-          const slicesMatch = imageDescription.match(/slices=(\d+)/)
-          const framesMatch = imageDescription.match(/frames=(\d+)/)
-          return {
-              slices: slicesMatch ? parseInt(slicesMatch[1], 10) : 1,
-              frames: framesMatch ? parseInt(framesMatch[1], 10) : 1
+        if (!(arrayBuffer instanceof ArrayBuffer)) {
+          throw new Error('Unsupported input type: Expected Buffer or ArrayBuffer')
+        }
+        const tiff = await fromArrayBuffer(arrayBuffer)
+        const imageCount = await tiff.getImageCount()
+        // Read all image slices
+        const image = await tiff.getImage(0)
+        const nFrames = await tiff.getImageCount()
+        const width = image.getWidth()
+        const height = image.getHeight()
+        let samplesPerPixel = image.getSamplesPerPixel()
+        const bitDepth = image.getBytesPerPixel() * 8
+        // Extract ImageJ-specific metadata (if present)
+        function extractSlicesAndFrames(metadata) {
+            if (!metadata) return { slices: 1, frames: 1 }
+            const slicesMatch = metadata.match(/slices=(\d+)/)
+            const framesMatch = metadata.match(/frames=(\d+)/)
+            return {
+                sizeZ: slicesMatch ? parseInt(slicesMatch[1], 10) : 1,
+                sizeT: framesMatch ? parseInt(framesMatch[1], 10) : 1
+            }
+        }
+        const metadata = image.getFileDirectory()
+        const imageDescription = metadata.ImageDescription
+        //ImageJ meta data
+        let sizeC = 1
+        let { sizeZ, sizeT } = extractSlicesAndFrames(imageDescription)
+        //parse OME-tiff
+        let sliceOrder = new Array(nFrames)
+        for (let i = 0; i < nFrames; i++)
+          sliceOrder[i] = i
+        const isOME = imageDescription?.includes("OME-XML")
+        if (isOME) {
+          const parser = new DOMParser()
+          const xmlDoc = parser.parseFromString(imageDescription, "text/xml")
+          // Extract number of Z slices, time frames, and channels from <Pixels>
+          const pixelsNode = xmlDoc.getElementsByTagName("Pixels")[0]
+          sizeZ = parseInt(pixelsNode.getAttribute("SizeZ"), 10) || 1
+          sizeT = parseInt(pixelsNode.getAttribute("SizeT"), 10) || 1
+          sizeC = parseInt(pixelsNode.getAttribute("SizeC"), 10) || 1
+          const planes = xmlDoc.getElementsByTagName("Plane")
+          let Z = new Array(nFrames).fill(0)
+          let T = new Array(nFrames).fill(0)
+          let C = new Array(nFrames).fill(0)
+          for (let i = 0; i < Math.min(planes.length, nFrames); i++) {
+              const plane = planes[i]
+              Z[i] = parseInt(plane.getAttribute("TheZ"), 10) || 0
+              T[i] = parseInt(plane.getAttribute("TheT"), 10) || 0
+              C[i] = parseInt(plane.getAttribute("TheC"), 10) || 0
           }
-        }
-        const imageDescription = image?.meta?.tiff?.tags?.ImageDescription
-        const { slices, frames } = extractSlicesAndFrames(imageDescription)
+            // Map TIFF slice indices into output volume order
+            for (let i = 0; i < nFrames; i++) {
+                sliceOrder[i] = Z[i] + (T[i] * sizeZ) + (C[i] * sizeZ * sizeT)
+            }
+          if (isVerbose) {
+            console.log(`OME SizeZ (Slices): ${sizeZ}, SizeT (Frames): ${sizeT}, SizeC (Channels): ${sizeC}`)
+            // console.log("Z (Slices):", Z)
+            // console.log("T (Timepoints):", T)
+            // console.log("C (Channels):", C)
+            // console.log("sliceOrder:", sliceOrder)
+          }
+        } //if isOME
+        // Create NIfTI header
         const hdr = new nifti.NIFTI1()
         hdr.littleEndian = true
-        hdr.dims = [3, 1, 1, 1, 0, 0, 0, 0]
-        hdr.dims[1] = image.width
-        hdr.dims[2] = image.height
-        hdr.dims[3] = n3x4
-        if ((slices * frames === n3x4) && (frames > 1)) {
-          // 4d dataset
+        console.log(nFrames, sizeZ, sizeT, sizeC)
+        hdr.dims = [3, width, height, nFrames, 0, 0, 0, 0]
+        if ((sizeZ * sizeT * sizeC === nFrames) && (nFrames > 1)) {
+            hdr.dims[0] = 4
+            hdr.dims[3] = sizeZ
+            hdr.dims[4] = sizeT
+            hdr.dims[5] = sizeC
+        }
+        let isInterleave = true
+        let isRGB = (samplesPerPixel === 3 && bitDepth === 24) || (samplesPerPixel === 4 && bitDepth === 32)
+        if ((sizeZ * sizeT === 1) && (samplesPerPixel > 1) && (!isRGB)  && (nFrames % samplesPerPixel === 0)) {
           hdr.dims[0] = 4
-          hdr.dims[3] = slices
-          hdr.dims[4] = frames
+          hdr.dims[3] = Math.floor(nFrames / samplesPerPixel)
+          hdr.dims[4] = samplesPerPixel
+          samplesPerPixel = 1
+          isInterleave = false
+          throw new Error('TODO: Leica LSM e.g. colocsample1b.lsm')
         }
-        // set pixDims
+        // Set pixel dimensions
         hdr.pixDims = [1, 1, 1, 1, 1, 0, 0, 0]
-        let chan = image.channels
-        //set datatype
-        if ((image.bitDepth === 16) && (image.channels === 1)) {
-          hdr.numBitsPerVoxel = 16
-          if ((Number.isFinite(maxValue)) && (maxValue < 32768))
-            hdr.datatypeCode = 4 //DT_INT16
-          else
-            hdr.datatypeCode = 512 // DT_UINT16
-        } else if ((image.bitDepth === 8) && (image.channels === 1)) {
-          hdr.numBitsPerVoxel = 8
-          hdr.datatypeCode = 2 // DT_UINT8
-        } else if ((image.bitDepth === 8) && (image.channels === 3)) {
-          hdr.numBitsPerVoxel = 24
-          hdr.datatypeCode = 128 // DT_RGB
-        }  else if ((image.bitDepth === 8) && (image.channels === 4)) {
-          // n.b. getPixelsArray() discards alpha
-          //hdr.numBitsPerVoxel = 24
-          //hdr.datatypeCode = 128 // DT_RGB
-          image.channels = 3
-          hdr.numBitsPerVoxel = 32
-          hdr.datatypeCode = 2304 // DT_RGBA32
+        if (isVerbose) {
+            console.log(`NIfTI dimensions: ${hdr.dims.slice(1).join('×')}, bit-depth: ${bitDepth}, channels: ${samplesPerPixel}`)
+        }
+        // Determine datatype based on bit depth
+        if (bitDepth === 16 && samplesPerPixel === 1) {
+            hdr.numBitsPerVoxel = 16
+            let sampleFormat = metadata.SampleFormat ? metadata.SampleFormat[0] : undefined
+            if (sampleFormat === 2) {
+              hdr.datatypeCode = 4 // DT_INT16
+            } else {
+              hdr.datatypeCode = 512 // DT_UINT16
+            }
+        } else if (bitDepth === 8 && samplesPerPixel === 1) {
+            hdr.numBitsPerVoxel = 8
+            hdr.datatypeCode = 2 // DT_UINT8
+        } else if (bitDepth === 24 && samplesPerPixel === 3) {
+            hdr.numBitsPerVoxel = 24
+            hdr.datatypeCode = 128 // DT_RGB
+        } else if (bitDepth === 32 && samplesPerPixel === 4) {
+            hdr.numBitsPerVoxel = 32
+            hdr.datatypeCode = 2304 // DT_RGBA32
         } else {
-          throw new Error(`Unsupported datatype bitDepth: ${image.bitDepth} channels:  ${image.channels}`)
+            throw new Error(`Unsupported TIFF bit depth: ${bitDepth}, channels: ${samplesPerPixel}`)
         }
-        if (verbose) {
-          console.log(`${hdr.dims[1]}×${hdr.dims[2]}×${hdr.dims[3]}×${hdr.dims[4]} bit-depth ${image.bitDepth} channels ${image.channels}`)
-        }
-        const nvox = hdr.dims[1] * hdr.dims[2] * n3x4
-        // Determine the correct TypedArray based on bit depth
+        // Create image data buffer
+        const nvox = width * height * nFrames
         let imgArray
-        if (hdr.datatypeCode === 4) { // DT_INT16
+        if (hdr.datatypeCode === 4) {
             imgArray = new Int16Array(nvox)
-        } else if (hdr.datatypeCode === 512) { // DT_UINT16
+        } else if (hdr.datatypeCode === 512) {
             imgArray = new Uint16Array(nvox)
         } else {
-            imgArray = new Uint8Array(nvox * chan)
+            imgArray = new Uint8Array(nvox * samplesPerPixel)
         }
-        // Copy each TIFF slice into the unified array
-        for (let i = 0; i < n3x4; i++) {
-            if (verbose) console.log('slice', i)
-            const rawData = images[i].getPixelsArray() // Get raw pixel data
-            const sliceData = new Uint8Array(rawData.flat()) // Flatten nested
-            const offset = i * image.width * image.height // Compute correct slice offset
-            if (sliceData.length !== image.width * image.height * chan) {
-                throw new Error(`Unexpected pixel count in slice ${i}: expected ${image.width * image.height * chan}, got ${sliceData.length}`)
+        // Read pixel data from each slice
+        for (let i = 0; i < nFrames; i++) {
+            //if (isVerbose) console.log(`Processing slice ${i}`)
+            const image = await tiff.getImage(i)
+            const img = await image.readRasters({ interleave: isInterleave })
+            if (isInterleave) {
+              const offset = sliceOrder[i] * width * height * samplesPerPixel
+              if (img.length !== width * height * samplesPerPixel) {
+                  throw new Error(`All slices must have the same dimensions. Unexpected pixel count in slice ${i}: expected ${width * height * samplesPerPixel}, got ${img.length}`)
+              }
+              imgArray.set(img, offset)
+            } else {
+              /*TODO const rows = img.length // Number of arrays
+              const cols = rows > 0 ? img[0].length : 0; // Length of the first array
+              console.log(`i ${rows}x${cols}`)
+              const metadata = image.getFileDirectory()*/
             }
-            imgArray.set(sliceData, offset) // Copy slice data to correct position
         }
         const img8 = new Uint8Array(imgArray.buffer)
+        // Finalize NIfTI file
         hdr.vox_offset = 352
         hdr.scl_inter = 0
-        hdr.scl_slope = 1 // todo: check
+        hdr.scl_slope = 1
         hdr.magic = 'n+1'
         const hdrBytes = hdrToArrayBufferX({ ...hdr, vox_offset: 352 })
         const opad = new Uint8Array(4)

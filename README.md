@@ -1,6 +1,6 @@
 # tiff-loader
 
-The tiff-loader is a NiiVue plugin that converts TIFF bitmap images into NIfTI voxel-based images. 
+The tiff-loader is a NiiVue plugin that converts TIFF bitmap images into NIfTI voxel-based images. It uses the [geotiff](https://github.com/geotiffjs/geotiff.js) library parse TIFF files for visualization or analysis.
 
 The Tagged Image File Format became popular in miscroscopy for its ability to include high precision (16-bit depth) and custom tags to report scanning important parameters. For example, Leica LSM (Laser Scanning Microscope) images are based on the TIFF format, but they contain additional metadata and custom extensions specific to Leica confocal microscopy. The popular ImageJ inserts proprietary information (e.g. using `frames` and `slices` to define 4D datasets). The Open Microscopy Environment [OME-TIFF](https://ome-model.readthedocs.io/en/stable/ome-tiff/) specifies useful custom tags. Since different tools specify different tags, [ImageJ provides multiple different TIFF loaders](https://imagej.net/formats/tiff).
 
@@ -31,13 +31,13 @@ node ./src/tiff2nii.js ./tests/testData/shapes_deflate.tif
 While TIFF is a popular 2D image format for bitmaps, it is also used by scientific instruments for multi-frame datasets with high precision (e.g. 16-bit scalars).
 
  - [ImageJ samples](https://samples.fiji.sc/) including ImageJ TIFF and LSM (Leica variation of TIFF).
- - [OME-TIFF sample data](https://docs.openmicroscopy.org/ome-model/5.6.3/ome-tiff/data.html).
+ - [OME-TIFF sample data](https://ome-model.readthedocs.io/en/stable/ome-tiff/data.html).
  - [Example TIFF images illustrating edge cases such as rare compression schemes](https://github.com/tlnagy/exampletiffs).
 
-## Links
+## Alternative libraries
 
-For scientific applications, we need to preserve the precision of the source data (retaining 8, 16 or 32 bits per channel) and read 4D datasets (with 3D slices and different timepoints or contrasts). This limits the number of suitable libraries.
+For scientific applications, we need to preserve the precision of the source data (retaining 8, 16 or 32 bits per channel) and read 4D datasets (with 3D slices and different timepoints or contrasts). This limits the number of suitable libraries. This repository uses geotiff for speed and compatibility.
 
- - [geotiff](https://github.com/geotiffjs/geotiff.js) is a JavaScript library for reading TIFF images.
+ - [geotiff](https://github.com/geotiffjs/geotiff.js) is a JavaScript library for reading TIFF images. Requires 600ms for convert a 16-bit 240x295x41x17 TIF.
  - [image-js](https://github.com/image-js/image-js) is a JavaScript library for reading TIFF images. It does not support PackBits compression. Requires 2166ms for convert a 16-bit 240x295x41x17 TIF.
 
