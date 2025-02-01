@@ -89,6 +89,79 @@ function hdrToArrayBufferX(hdr) {
   return byteArray
 }
 
+function parseLSMInfo(uint8Array) {
+  // Use DataView to read the binary structure
+  const dataView = new DataView(uint8Array.buffer)
+  let offset = 0
+
+  function readUint32() {
+    const value = dataView.getUint32(offset, true) // Little-endian
+    offset += 4
+    return value
+  }
+
+  function readUint16() {
+    const value = dataView.getUint16(offset, true) // Little-endian
+    offset += 2
+    return value
+  }
+
+  function readFloat64() {
+    const value = dataView.getFloat64(offset, true) // Little-endian
+    offset += 8
+    return value
+  }
+
+  const lsmInfo = {
+    MagicNumber: readUint32(),
+    StructureSize: readUint32(),
+    DimensionX: readUint32(),
+    DimensionY: readUint32(),
+    DimensionZ: readUint32(),
+    DimensionChannels: readUint32(),
+    DimensionTime: readUint32(),
+    IntensityDataType: readUint32(),
+    ThumbnailX: readUint32(),
+    ThumbnailY: readUint32(),
+    VoxelSizeX: readFloat64(),
+    VoxelSizeY: readFloat64(),
+    VoxelSizeZ: readFloat64(),
+    OriginX: readFloat64(),
+    OriginY: readFloat64(),
+    OriginZ: readFloat64(),
+    ScanType: readUint16(),
+    SpectralScan: readUint16(),
+    DataType: readUint32(),
+    OffsetVectorOverlay: readUint32(),
+    OffsetInputLut: readUint32(),
+    OffsetOutputLut: readUint32(),
+    OffsetChannelColors: readUint32(),
+    TimeInterval: readFloat64(),
+    OffsetChannelDataTypes: readUint32(),
+    OffsetScanInformation: readUint32(),
+    OffsetKsData: readUint32(),
+    OffsetTimeStamps: readUint32(),
+    OffsetEventList: readUint32(),
+    OffsetRoi: readUint32(),
+    OffsetBleachRoi: readUint32(),
+    OffsetNextRecording: readUint32(),
+    DisplayAspectX: readFloat64(),
+    DisplayAspectY: readFloat64(),
+    DisplayAspectZ: readFloat64(),
+    DisplayAspectTime: readFloat64(),
+    OffsetMeanOfRoisOverlay: readUint32(),
+    OffsetTopoIsolineOverlay: readUint32(),
+    OffsetTopoProfileOverlay: readUint32(),
+    OffsetLinescanOverlay: readUint32(),
+    ToolbarFlags: readUint32(),
+    OffsetChannelWavelength: readUint32(),
+    OffsetChannelFactors: readUint32(),
+    ObjectiveSphereCorrection: readFloat64(),
+    OffsetUnmixParameters: readUint32()
+  }
+  return lsmInfo
+}
+
 export async function tiff2nii(inBuffer, isVerbose = false) {
   try {
     // Load the TIFF using geotiff.js
@@ -106,25 +179,59 @@ export async function tiff2nii(inBuffer, isVerbose = false) {
       throw new Error('Unsupported input type: Expected Buffer or ArrayBuffer')
     }
     const tiff = await fromArrayBuffer(arrayBuffer)
-    // Read all image slices
-    const image = await tiff.getImage(0)
-    const nFrames = await tiff.getImageCount()
-    const width = image.getWidth()
-    const height = image.getHeight()
-    let samplesPerPixel = image.getSamplesPerPixel()
-    const bitDepth = image.getBytesPerPixel() * 8
-    // Create NIfTI header
-    const hdr = new nifti.NIFTI1()
-    hdr.littleEndian = true
-    hdr.pixDims = [1, 1, 1, 1, 1, 0, 0, 0]
-    // for ImageJ and OME: header values stored in ImageDescription
-    const metadata = image.getFileDirectory()
-    // console.log(metadata)
-    // TODO ResolutionUnit 296 SHORT Inch Centimter
-    const imageDescription = metadata.ImageDescription
+    // Read all 2D slices
+    let nFrames = await tiff.getImageCount()
+    const images = []
+    for (let i = 0; i < nFrames; i++) {
+      images.push(await tiff.getImage(i))
+    }
+    //we will convert all 2D slices that match the shape of the first
+    const image0 = images[0]
+    const width = image0.getWidth()
+    const height = image0.getHeight()
+    let samplesPerPixel = image0.getSamplesPerPixel()
+    const bitDepth = image0.getBytesPerPixel() * 8
     let sizeZ = 1 //slices
     let sizeT = 1 //timepoints
     let sizeC = 1 //channels
+    // Create NIfTI header
+    const hdr = new nifti.NIFTI1()
+    hdr.littleEndian = true
+    hdr.vox_offset = 352
+    hdr.scl_inter = 0
+    hdr.scl_slope = 1
+    hdr.magic = 'n+1'
+    hdr.pixDims = [1, 1, 1, 1, 1, 0, 0, 0]
+    // for ImageJ and OME: header values stored in ImageDescription
+    const metadata = image0.getFileDirectory()
+    // Read LSM header
+    // since geotiff does not have a name for tag 34412, it explicitly calls it "undefined"
+    //  we can still identify it from the first four bytes "MagicNumber"
+    let isLSM = false
+    if (
+      metadata?.undefined instanceof Uint8Array && // Ensure it's a Uint8Array
+      metadata.undefined.length >= 224 &&
+      metadata.undefined[0] === 76 && // 'L'
+      metadata.undefined[1] === 73 && // 'I'
+      metadata.undefined[2] === 0 &&
+      metadata.undefined[3] === 4
+    ) {
+      const hdrLSM = parseLSMInfo(metadata.undefined)
+      hdr.pixDims[1] = hdrLSM.VoxelSizeX * 1000000.0
+      hdr.pixDims[2] = hdrLSM.VoxelSizeX * 1000000.0
+      hdr.pixDims[3] = hdrLSM.VoxelSizeX * 1000000.0
+      hdr.xyzt_units = 3
+      sizeZ = hdrLSM.DimensionZ
+      sizeT = hdrLSM.DimensionTime
+      sizeC = hdrLSM.DimensionChannels
+      isLSM = true
+      if (nFrames !== sizeZ * sizeT * sizeC) {
+        console.log(hdrLSM)
+        console.log(`Inconsistent LSM TIFF ${sizeZ}×${sizeT}×${sizeC} != ${nFrames} (perhaps multi-dimensional)`)
+        console.log(`${width}×${height}c${samplesPerPixel}bpp${bitDepth}`)
+      }
+    }
+    const imageDescription = metadata.ImageDescription
     //ImageJ meta data
     if (imageDescription?.includes('ImageJ=')) {
       const slicesMatch = imageDescription.match(/slices=(\d+)/)
@@ -142,6 +249,7 @@ export async function tiff2nii(inBuffer, isVerbose = false) {
       if (isUm) hdr.xyzt_units = 3
     }
     //parse OME-tiff
+    let isSliceOrderSequential = true
     let sliceOrder = new Array(nFrames)
     for (let i = 0; i < nFrames; i++) sliceOrder[i] = i
     if (imageDescription?.includes('<OME xml')) {
@@ -172,13 +280,51 @@ export async function tiff2nii(inBuffer, isVerbose = false) {
         }
         // Map TIFF slice indices into output volume order
         for (let i = 0; i < nFrames; i++) {
-          sliceOrder[i] = Z[i] + T[i] * sizeZ + C[i] * sizeZ * sizeT
+          let order = Z[i] + T[i] * sizeZ + C[i] * sizeZ * sizeT
+          if (order !== i) {
+            isSliceOrderSequential = false
+          }
+          sliceOrder[i] = order
         }
         if (isVerbose) {
           console.log(`OME SizeZ: ${sizeZ}, SizeT: ${sizeT}, SizeC: ${sizeC}`)
         }
       } // if multiple planes
     } //if isOME
+    //determine if any slices differ from the first
+    let nFramesTotal = nFrames
+    nFrames = 0
+    for (let i = 0; i < nFramesTotal; i++) {
+      const image = images[i]
+      const widthI = image.getWidth()
+      const heightI = image.getHeight()
+      let samplesPerPixelI = image.getSamplesPerPixel()
+      const bitDepthI = image.getBytesPerPixel() * 8
+      if (widthI === width && heightI === height && samplesPerPixelI === samplesPerPixel && bitDepthI === bitDepth) {
+        sliceOrder[i] = nFrames
+        nFrames++
+        continue
+      }
+      sliceOrder[i] = -1
+      if (i !== nFrames) {
+        continue //only report 1st mismatch
+      }
+      console.log(
+        `${i} Unable to stack all TIFF slices (dimensions vary): ${width}×${height}c${samplesPerPixel}bpp${bitDepth} vs ${widthI}×${heightI}c${samplesPerPixelI}bpp${bitDepthI}`
+      )
+    }
+    if (nFrames !== nFramesTotal) {
+      if (!isSliceOrderSequential) {
+        throw new Error(`Slice order is not sequential and slice dimensions vary`)
+      }
+      if (isLSM && sizeZ * sizeT * sizeC !== nFrames) {
+        if (sizeZ * sizeT === nFrames) {
+          sizeC = 1
+          console.log(`only copying first channel of LSM data`)
+        }
+      }
+      console.log(`converting ${nFrames} of ${nFramesTotal} slices`)
+    }
     //set dims
     hdr.dims = [3, width, height, nFrames, 0, 0, 0, 0]
     if (sizeZ * sizeT * sizeC === nFrames && sizeT * sizeC > 1 && nFrames > 1) {
@@ -190,22 +336,8 @@ export async function tiff2nii(inBuffer, isVerbose = false) {
         hdr.dims[5] = sizeC
       } // if 5D
     } // if >3D
-    let isInterleave = true
-    let isRGB = (samplesPerPixel === 3 && bitDepth === 24) || (samplesPerPixel === 4 && bitDepth === 32)
-    if (sizeZ * sizeT === 1 && samplesPerPixel > 1 && !isRGB && nFrames % samplesPerPixel === 0) {
-      hdr.dims[0] = 4
-      hdr.dims[3] = Math.floor(nFrames / samplesPerPixel)
-      hdr.dims[4] = samplesPerPixel
-      samplesPerPixel = 1
-      isInterleave = false
-      throw new Error('TODO: Leica LSM e.g. colocsample1b.lsm')
-    }
-    if (isVerbose) {
-      console.log(
-        `NIfTI dimensions: ${hdr.dims.slice(1).join('×')}, bit-depth: ${bitDepth}, channels: ${samplesPerPixel}, pixDims: ${hdr.pixDims.slice(1, 4).join('×')} unit: ${hdr.xyzt_units}`
-      )
-    }
     // Determine datatype based on bit depth
+    let isRG = false
     if (bitDepth === 16 && samplesPerPixel === 1) {
       hdr.numBitsPerVoxel = 16
       let sampleFormat = metadata.SampleFormat ? metadata.SampleFormat[0] : undefined
@@ -217,6 +349,12 @@ export async function tiff2nii(inBuffer, isVerbose = false) {
     } else if (bitDepth === 8 && samplesPerPixel === 1) {
       hdr.numBitsPerVoxel = 8
       hdr.datatypeCode = 2 // DT_UINT8
+    } else if (bitDepth === 16 && samplesPerPixel === 2) {
+      //this is special: we need to pad RG images to RGB
+      isRG = true
+      samplesPerPixel = 3
+      hdr.numBitsPerVoxel = 24
+      hdr.datatypeCode = 128 // DT_RGB
     } else if (bitDepth === 24 && samplesPerPixel === 3) {
       hdr.numBitsPerVoxel = 24
       hdr.datatypeCode = 128 // DT_RGB
@@ -225,6 +363,11 @@ export async function tiff2nii(inBuffer, isVerbose = false) {
       hdr.datatypeCode = 2304 // DT_RGBA32
     } else {
       throw new Error(`Unsupported TIFF bit depth: ${bitDepth}, channels: ${samplesPerPixel}`)
+    }
+    if (isVerbose) {
+      console.log(
+        `NIfTI dimensions: ${hdr.dims.slice(1).join('×')}, bit-depth: ${bitDepth}, channels: ${samplesPerPixel}, pixDims: ${hdr.pixDims.slice(1, 4).join('×')} unit: ${hdr.xyzt_units}`
+      )
     }
     // Create image data buffer
     const nvox = width * height * nFrames
@@ -237,31 +380,39 @@ export async function tiff2nii(inBuffer, isVerbose = false) {
       imgArray = new Uint8Array(nvox * samplesPerPixel)
     }
     // Read pixel data from each slice
-    for (let i = 0; i < nFrames; i++) {
-      //if (isVerbose) console.log(`Processing slice ${i}`)
-      const image = await tiff.getImage(i)
-      const img = await image.readRasters({ interleave: isInterleave })
-      if (isInterleave) {
-        const offset = sliceOrder[i] * width * height * samplesPerPixel
-        if (img.length !== width * height * samplesPerPixel) {
-          throw new Error(
-            `All slices must have the same dimensions. Unexpected pixel count in slice ${i}: expected ${width * height * samplesPerPixel}, got ${img.length}`
-          )
-        }
-        imgArray.set(img, offset)
-      } else {
-        /*TODO const rows = img.length // Number of arrays
-              const cols = rows > 0 ? img[0].length : 0; // Length of the first array
-              console.log(`i ${rows}x${cols}`)
-              const metadata = image.getFileDirectory()*/
+    for (let i = 0; i < nFramesTotal; i++) {
+      if (sliceOrder[i] < 0) {
+        continue //this slice differs in dimension from the first slice
       }
+      const image = images[i]
+      //n.b. pools can improve performance https://geotiffjs.github.io/geotiff.js/
+      let img = await image.readRasters({ interleave: true })
+      if (isRG) {
+        //convert RG to RGB
+        let imgRG = new Uint8Array(img)
+        let nPx = width * height
+        img = new Uint8Array(nPx * 3)
+        let j = 0
+        for (let i = 0; i < imgRG.length; i += 2) {
+          img[j++] = imgRG[i]
+          img[j++] = imgRG[i + 1]
+          img[j++] = 0
+        }
+      } //if RG
+      const offset = sliceOrder[i] * width * height * samplesPerPixel
+      imgArray.set(img, offset)
     }
     const img8 = new Uint8Array(imgArray.buffer)
-    // Finalize NIfTI file
-    hdr.vox_offset = 352
-    hdr.scl_inter = 0
-    hdr.scl_slope = 1
-    hdr.magic = 'n+1'
+    // Create the 4×4 affine transformation matrix
+    const dxs = [hdr.pixDims[1], hdr.pixDims[2], hdr.pixDims[3]]
+    const ns = [hdr.dims[1], hdr.dims[2], hdr.dims[3]]
+    hdr.affine = [
+      [dxs[0], 0, 0, -((dxs[0] * ns[0]) / 2)],
+      [0, dxs[1], 0, -((dxs[1] * ns[1]) / 2)],
+      [0, 0, dxs[2], -((dxs[2] * ns[2]) / 2)],
+      [0, 0, 0, 1]
+    ]
+    // Copy header and image data to NIfTI file
     const hdrBytes = hdrToArrayBufferX({ ...hdr, vox_offset: 352 })
     const opad = new Uint8Array(4)
     const odata = new Uint8Array(hdrBytes.length + opad.length + img8.length)
