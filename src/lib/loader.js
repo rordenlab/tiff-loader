@@ -106,7 +106,6 @@ export async function tiff2nii(inBuffer, isVerbose = false) {
       throw new Error('Unsupported input type: Expected Buffer or ArrayBuffer')
     }
     const tiff = await fromArrayBuffer(arrayBuffer)
-    const imageCount = await tiff.getImageCount()
     // Read all image slices
     const image = await tiff.getImage(0)
     const nFrames = await tiff.getImageCount()
@@ -114,26 +113,38 @@ export async function tiff2nii(inBuffer, isVerbose = false) {
     const height = image.getHeight()
     let samplesPerPixel = image.getSamplesPerPixel()
     const bitDepth = image.getBytesPerPixel() * 8
-    // Extract ImageJ-specific metadata (if present)
-    function extractSlicesAndFrames(metadata) {
-      if (!metadata) return { slices: 1, frames: 1 }
-      const slicesMatch = metadata.match(/slices=(\d+)/)
-      const framesMatch = metadata.match(/frames=(\d+)/)
-      return {
-        sizeZ: slicesMatch ? parseInt(slicesMatch[1], 10) : 1,
-        sizeT: framesMatch ? parseInt(framesMatch[1], 10) : 1
-      }
-    }
+    // Create NIfTI header
+    const hdr = new nifti.NIFTI1()
+    hdr.littleEndian = true
+    hdr.pixDims = [1, 1, 1, 1, 1, 0, 0, 0]
+    // for ImageJ and OME: header values stored in ImageDescription
     const metadata = image.getFileDirectory()
+    // console.log(metadata)
+    // TODO ResolutionUnit 296 SHORT Inch Centimter
     const imageDescription = metadata.ImageDescription
+    let sizeZ = 1 //slices
+    let sizeT = 1 //timepoints
+    let sizeC = 1 //channels
     //ImageJ meta data
-    let sizeC = 1
-    let { sizeZ, sizeT } = extractSlicesAndFrames(imageDescription)
+    if (imageDescription?.includes('ImageJ=')) {
+      const slicesMatch = imageDescription.match(/slices=(\d+)/)
+      const framesMatch = imageDescription.match(/frames=(\d+)/)
+      const spacingMatch = imageDescription.match(/spacing=([\d.]+)/)
+      const unitMatch = imageDescription.match(/unit=([\S]+)/)
+      sizeZ = slicesMatch ? parseInt(slicesMatch[1], 10) : 1
+      sizeT = framesMatch ? parseInt(framesMatch[1], 10) : 1
+      const spacing = spacingMatch ? parseFloat(spacingMatch[1]) : 1.0
+      hdr.pixDims[1] = spacing
+      hdr.pixDims[2] = spacing
+      hdr.pixDims[3] = spacing
+      const unit = unitMatch ? unitMatch[1] : ''
+      const isUm = ['µm', '\xB5m', '�m'].includes(unit)
+      if (isUm) hdr.xyzt_units = 3
+    }
     //parse OME-tiff
     let sliceOrder = new Array(nFrames)
     for (let i = 0; i < nFrames; i++) sliceOrder[i] = i
-    const isOME = imageDescription?.includes('OME-XML')
-    if (isOME) {
+    if (imageDescription?.includes('<OME xml')) {
       const parser = new DOMParser()
       const xmlDoc = parser.parseFromString(imageDescription, 'text/xml')
       // Extract number of Z slices, time frames, and channels from <Pixels>
@@ -141,38 +152,44 @@ export async function tiff2nii(inBuffer, isVerbose = false) {
       sizeZ = parseInt(pixelsNode.getAttribute('SizeZ'), 10) || 1
       sizeT = parseInt(pixelsNode.getAttribute('SizeT'), 10) || 1
       sizeC = parseInt(pixelsNode.getAttribute('SizeC'), 10) || 1
+      hdr.pixDims[1] = parseFloat(pixelsNode.getAttribute('PhysicalSizeX')) || 1
+      hdr.pixDims[2] = parseFloat(pixelsNode.getAttribute('PhysicalSizeY')) || 1
+      hdr.pixDims[3] = parseFloat(pixelsNode.getAttribute('PhysicalSizeZ')) || 1
+      if ((pixelsNode.getAttribute('PhysicalSizeXUnit') || '') === 'µm') hdr.xyzt_units = 3
+      if ((pixelsNode.getAttribute('PhysicalSizeXUnit') || '') === 'mm') hdr.xyzt_units = 2
+      if ((pixelsNode.getAttribute('PhysicalSizeXUnit') || '') === 'µm') hdr.xyzt_units = 3
+      if ((pixelsNode.getAttribute('PhysicalSizeXUnit') || '') === 'mm') hdr.xyzt_units = 2
       const planes = xmlDoc.getElementsByTagName('Plane')
-      let Z = new Array(nFrames).fill(0)
-      let T = new Array(nFrames).fill(0)
-      let C = new Array(nFrames).fill(0)
-      for (let i = 0; i < Math.min(planes.length, nFrames); i++) {
-        const plane = planes[i]
-        Z[i] = parseInt(plane.getAttribute('TheZ'), 10) || 0
-        T[i] = parseInt(plane.getAttribute('TheT'), 10) || 0
-        C[i] = parseInt(plane.getAttribute('TheC'), 10) || 0
-      }
-      // Map TIFF slice indices into output volume order
-      for (let i = 0; i < nFrames; i++) {
-        sliceOrder[i] = Z[i] + T[i] * sizeZ + C[i] * sizeZ * sizeT
-      }
-      if (isVerbose) {
-        console.log(`OME SizeZ (Slices): ${sizeZ}, SizeT (Frames): ${sizeT}, SizeC (Channels): ${sizeC}`)
-        // console.log("Z (Slices):", Z)
-        // console.log("T (Timepoints):", T)
-        // console.log("C (Channels):", C)
-        // console.log("sliceOrder:", sliceOrder)
-      }
+      if (planes.length > 0) {
+        let Z = new Array(nFrames).fill(0)
+        let T = new Array(nFrames).fill(0)
+        let C = new Array(nFrames).fill(0)
+        for (let i = 0; i < Math.min(planes.length, nFrames); i++) {
+          const plane = planes[i]
+          Z[i] = parseInt(plane.getAttribute('TheZ'), 10) || 0
+          T[i] = parseInt(plane.getAttribute('TheT'), 10) || 0
+          C[i] = parseInt(plane.getAttribute('TheC'), 10) || 0
+        }
+        // Map TIFF slice indices into output volume order
+        for (let i = 0; i < nFrames; i++) {
+          sliceOrder[i] = Z[i] + T[i] * sizeZ + C[i] * sizeZ * sizeT
+        }
+        if (isVerbose) {
+          console.log(`OME SizeZ: ${sizeZ}, SizeT: ${sizeT}, SizeC: ${sizeC}`)
+        }
+      } // if multiple planes
     } //if isOME
-    // Create NIfTI header
-    const hdr = new nifti.NIFTI1()
-    hdr.littleEndian = true
+    //set dims
     hdr.dims = [3, width, height, nFrames, 0, 0, 0, 0]
-    if (sizeZ * sizeT * sizeC === nFrames && nFrames > 1) {
+    if (sizeZ * sizeT * sizeC === nFrames && sizeT * sizeC > 1 && nFrames > 1) {
       hdr.dims[0] = 4
       hdr.dims[3] = sizeZ
       hdr.dims[4] = sizeT
-      hdr.dims[5] = sizeC
-    }
+      if (sizeC > 1) {
+        hdr.dims[0] = 5
+        hdr.dims[5] = sizeC
+      } // if 5D
+    } // if >3D
     let isInterleave = true
     let isRGB = (samplesPerPixel === 3 && bitDepth === 24) || (samplesPerPixel === 4 && bitDepth === 32)
     if (sizeZ * sizeT === 1 && samplesPerPixel > 1 && !isRGB && nFrames % samplesPerPixel === 0) {
@@ -183,11 +200,9 @@ export async function tiff2nii(inBuffer, isVerbose = false) {
       isInterleave = false
       throw new Error('TODO: Leica LSM e.g. colocsample1b.lsm')
     }
-    // Set pixel dimensions
-    hdr.pixDims = [1, 1, 1, 1, 1, 0, 0, 0]
     if (isVerbose) {
       console.log(
-        `NIfTI dimensions: ${hdr.dims.slice(1).join('×')}, bit-depth: ${bitDepth}, channels: ${samplesPerPixel}`
+        `NIfTI dimensions: ${hdr.dims.slice(1).join('×')}, bit-depth: ${bitDepth}, channels: ${samplesPerPixel}, pixDims: ${hdr.pixDims.slice(1, 4).join('×')} unit: ${hdr.xyzt_units}`
       )
     }
     // Determine datatype based on bit depth

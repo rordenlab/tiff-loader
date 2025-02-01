@@ -17,4 +17,3 @@ describe('TIFF Conversion Tests', () => {
     const niftiImageData = nifti.readImage(hdr, niidata)
   })
 })
-
