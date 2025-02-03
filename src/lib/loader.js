@@ -164,14 +164,9 @@ function parseLSMInfo(uint8Array) {
 
 export async function tiff2niiStack(inBuffer, isVerbose = false, stackGroup = 0) {
   try {
-    // Load the TIFF using geotiff.js
     let arrayBuffer = inBuffer
     // Buffer is an instance of Uint8Array, so we can use that (in most places)
     // see: https://sindresorhus.com/blog/goodbye-nodejs-buffer
-    //
-    // if (Buffer.isBuffer(inBuffer)) {
-    //   arrayBuffer = inBuffer.buffer.slice(inBuffer.byteOffset, inBuffer.byteOffset + inBuffer.byteLength)
-    // }
     if (inBuffer instanceof Uint8Array) {
       arrayBuffer = inBuffer.buffer.slice(inBuffer.byteOffset, inBuffer.byteOffset + inBuffer.byteLength)
     }
@@ -204,7 +199,7 @@ export async function tiff2niiStack(inBuffer, isVerbose = false, stackGroup = 0)
     // n.b. read meta data from first TIFF directory, prior to culling stack groups
     const metadata = images[0].getFileDirectory()
     // cull 2D slices from other stack groups
-    if (stackConfigs.length > 0) {
+    if (stackConfigs.length > 1) {
       if (stackGroup >= stackConfigs.length || stackGroup < 0) stackGroup = 0
       images = images.filter((_, i) => stackGroups[i] === stackGroup)
       if (isVerbose) {
@@ -270,7 +265,6 @@ export async function tiff2niiStack(inBuffer, isVerbose = false, stackGroup = 0)
       }
     }
     const imageDescription = metadata.ImageDescription
-    let isSliceOrderSequential = true
     let sliceOrder = new Array(nFrames)
     for (let i = 0; i < nFrames; i++) sliceOrder[i] = i
     //ImageJ meta data
@@ -284,18 +278,22 @@ export async function tiff2niiStack(inBuffer, isVerbose = false, stackGroup = 0)
       sizeT = tMatch ? parseInt(tMatch[1], 10) : 1
       sizeC = cMatch ? parseInt(cMatch[1], 10) : 1
       const spacing = spacingMatch ? parseFloat(spacingMatch[1]) : 1.0
-      hdr.pixDims[1] = spacing
-      hdr.pixDims[2] = spacing
+      //ResolutionUnit is 1=undefined, 2=inch(default), 3=cm, but ImageJ interprets 1 as cm
+      let scale = metadata.ResolutionUnit === 2 ? 2.54 : 1
+      const xRes = metadata.XResolution ? metadata.XResolution[0] / metadata.XResolution[1] : 1
+      hdr.pixDims[1] = scale / xRes
+      const yRes = metadata.YResolution ? metadata.YResolution[0] / metadata.YResolution[1] : 1
+      hdr.pixDims[2] = scale / yRes // Convert DPI to µm
+      // ImageJ "spacing" is z-spacing, see flybrain.tif
       hdr.pixDims[3] = spacing
       const unit = unitMatch ? unitMatch[1] : ''
       const isUm = ['µm', '\xB5m', '�m'].includes(unit)
-      console.log(imageDescription)
       if (isUm) hdr.xyzt_units = 3
-      /*if ((nFrames > 1) && (sizeZ * sizeT * sizeC === nFrames)) {
+      if (nFrames > 1 && sizeZ * sizeT * sizeC === nFrames) {
         //reorder so 5D data is X,Y, Space (z), Time (t), Channel (c)
-        const zIndex = imageDescription.indexOf("slices=");
-        const tIndex = imageDescription.indexOf("frames=");
-        const cIndex = imageDescription.indexOf("channels=");
+        const zIndex = imageDescription.indexOf('slices=')
+        const tIndex = imageDescription.indexOf('frames=')
+        const cIndex = imageDescription.indexOf('channels=')
         let zStep = 1
         if (zIndex > tIndex) zStep *= sizeT
         if (zIndex > cIndex) zStep *= sizeC
@@ -305,18 +303,14 @@ export async function tiff2niiStack(inBuffer, isVerbose = false, stackGroup = 0)
         let cStep = 1
         if (cIndex > zIndex) cStep *= sizeZ
         if (cIndex > tIndex) cStep *= sizeT
-        // console.log(zStep, tStep, cStep)
         for (let i = 0; i < nFrames; i++) {
-            let z = Math.floor(i / zStep) % sizeZ
-            let t = Math.floor(i / tStep) % sizeT
-            let c = Math.floor(i / cStep) % sizeC
-            let order = z + t * sizeZ + c * (sizeZ * sizeT)
-            if (order !== i) {
-                isSliceOrderSequential = false;
-            }
-            sliceOrder[i] = order;
+          let z = Math.floor(i / zStep) % sizeZ
+          let t = Math.floor(i / tStep) % sizeT
+          let c = Math.floor(i / cStep) % sizeC
+          let order = z + t * sizeZ + c * (sizeZ * sizeT)
+          sliceOrder[i] = order
         }
-      }*/
+      }
     } //if ImageJ
     //parse OME-tiff
     if (imageDescription?.includes('<OME xml')) {
@@ -348,9 +342,6 @@ export async function tiff2niiStack(inBuffer, isVerbose = false, stackGroup = 0)
         // Map TIFF slice indices into output volume order
         for (let i = 0; i < nFrames; i++) {
           let order = Z[i] + T[i] * sizeZ + C[i] * sizeZ * sizeT
-          if (order !== i) {
-            isSliceOrderSequential = false
-          }
           sliceOrder[i] = order
         }
         if (isVerbose) {
@@ -391,6 +382,17 @@ export async function tiff2niiStack(inBuffer, isVerbose = false, stackGroup = 0)
     } else if (bitDepth === 24 && samplesPerPixel === 3) {
       hdr.numBitsPerVoxel = 24
       hdr.datatypeCode = 128 // DT_RGB
+    } else if (bitDepth === 32 && samplesPerPixel === 1) {
+      hdr.numBitsPerVoxel = 32
+      let sampleFormat = metadata.SampleFormat ? metadata.SampleFormat[0] : undefined
+      // 1=uint, 2=int, 3=float
+      if (sampleFormat === 2) {
+        hdr.datatypeCode = 8 // DT_INT32
+      } else if (sampleFormat === 3) {
+        hdr.datatypeCode = 16 // DT_FLOAT32
+      } else {
+        hdr.datatypeCode = 768 // DT_UINT32
+      }
     } else if (bitDepth === 32 && samplesPerPixel === 4) {
       hdr.numBitsPerVoxel = 32
       hdr.datatypeCode = 2304 // DT_RGBA32
@@ -407,8 +409,14 @@ export async function tiff2niiStack(inBuffer, isVerbose = false, stackGroup = 0)
     let imgArray
     if (hdr.datatypeCode === 4) {
       imgArray = new Int16Array(nvox)
+    } else if (hdr.datatypeCode === 8) {
+      imgArray = new Int32Array(nvox)
+    } else if (hdr.datatypeCode === 16) {
+      imgArray = new Float32Array(nvox)
     } else if (hdr.datatypeCode === 512) {
       imgArray = new Uint16Array(nvox)
+    } else if (hdr.datatypeCode === 768) {
+      imgArray = new Uint32Array(nvox)
     } else {
       imgArray = new Uint8Array(nvox * samplesPerPixel)
     }

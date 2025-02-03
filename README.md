@@ -19,13 +19,14 @@ Since different software tools define their own TIFF metadata conventions, compa
 
 ## Local Development
 
-To illustrate this library, `tiff2nii` is a node.js converter that can be run from the command line:
+To illustrate this library, `tiff2nii` is a node.js converter that can be run from the command line. The wrapper `batch_convert.js` allows you to convert all the tiff/tif/lsm files in a folder:
 
 ```
 git clone git@github.com:rordenlab/tiff-loader.git
 cd tiff-loader
 npm install
 node ./src/tiff2nii.js ./tests/testData/shapes_deflate.tif
+node ./src/batch_convert.js /path/to/tiffs
 ```
 
 Note that Python equivalents (`tiff2nii.py` uses [imio](https://github.com/brainglobe/imio); `tiff2nii2.py` uses tifffile and nibabel). However, the Python converters are unaware of the tags used by ImageJ, LSM and OME. Therefore, these fail to correctly detect and order images based on slice, timing and channels, nor do they provide information about the [physical size](https://brainder.org/2012/09/23/the-nifti-file-format/).
