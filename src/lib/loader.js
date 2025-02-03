@@ -179,8 +179,8 @@ export async function tiff2niiStack(inBuffer, isVerbose = false, stackGroup = 0)
       throw new Error('Unsupported input type: Expected Buffer or ArrayBuffer')
     }
     const tiff = await fromArrayBuffer(arrayBuffer)
-    // Read all 2D slices
     let nFrames = await tiff.getImageCount()
+    // detect all stack group (2D slices with different dimensions)
     let images = []
     const stackGroups = new Array(nFrames).fill(0) // Default group is 0
     let stackConfigs = [] // Store unique slice configurations as an array
@@ -201,8 +201,9 @@ export async function tiff2niiStack(inBuffer, isVerbose = false, stackGroup = 0)
       // Assign the group index to this slice
       stackGroups[i] = configIndex
     }
-    //read meta data from first TIFF directory, prior to culling slice groupsS
+    // n.b. read meta data from first TIFF directory, prior to culling stack groups
     const metadata = images[0].getFileDirectory()
+    // cull 2D slices from other stack groups
     if (stackConfigs.length > 0) {
       if (stackGroup >= stackConfigs.length || stackGroup < 0) stackGroup = 0
       images = images.filter((_, i) => stackGroups[i] === stackGroup)
@@ -211,6 +212,7 @@ export async function tiff2niiStack(inBuffer, isVerbose = false, stackGroup = 0)
       }
       nFrames = images.length
     }
+    // now all 2D slices in images[] are from the same stack with identical dimensions
     const width = images[0].getWidth()
     const height = images[0].getHeight()
     let samplesPerPixel = images[0].getSamplesPerPixel()
@@ -241,10 +243,17 @@ export async function tiff2niiStack(inBuffer, isVerbose = false, stackGroup = 0)
       metadata.undefined[3] === 4
     ) {
       const hdrLSM = parseLSMInfo(metadata.undefined)
-      hdr.pixDims[1] = hdrLSM.VoxelSizeX * 1000000.0
-      hdr.pixDims[2] = hdrLSM.VoxelSizeX * 1000000.0
-      hdr.pixDims[3] = hdrLSM.VoxelSizeX * 1000000.0
-      hdr.xyzt_units = 3
+      // scale for thumbnail images
+      let scaleX = hdrLSM.DimensionX / width
+      hdr.pixDims[1] = scaleX * hdrLSM.VoxelSizeX * 1000000.0
+      let scaleY = hdrLSM.DimensionY / height
+      hdr.pixDims[2] = scaleY * hdrLSM.VoxelSizeY * 1000000.0
+      // n.b. thumbnails scaled inplane (X/Y) not Z
+      hdr.pixDims[3] = hdrLSM.VoxelSizeZ * 1000000.0
+      hdr.pixDims[4] = hdrLSM.TimeInterval
+      // units: NIFTI_UNITS_MICRON + NIFTI_UNITS_SEC
+      // todo: check Zeiss really specifies as sec
+      hdr.xyzt_units = 3 + 8
       sizeZ = hdrLSM.DimensionZ
       sizeT = hdrLSM.DimensionTime
       sizeC = hdrLSM.DimensionChannels

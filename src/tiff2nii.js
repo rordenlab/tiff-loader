@@ -17,13 +17,13 @@ try {
   const startTime = performance.now()
   const isVerbose = true
   let { niftiImage, stackConfigs } = await tiff2niiStack(fileBuffer, isVerbose, 0)
-  const elapsedTime = performance.now() - startTime
+  let elapsedTimeStr = ` in ${(performance.now() - startTime).toFixed(2)} ms`
   // Get base filename without extension
   const baseName = path.join(path.dirname(filePath), path.basename(filePath, path.extname(filePath)))
   if (stackConfigs.length < 2) {
     const outputFilePath = `${baseName}.nii`
     await fs.writeFile(outputFilePath, Buffer.from(niftiImage))
-    console.log(`Converted to ${outputFilePath} in ${elapsedTime.toFixed(2)} ms`)
+    console.log(`Converted to ${outputFilePath}${elapsedTimeStr}`)
   } else {
     // Handle multiple stacks by saving each stack with an appended name
     for (let i = 0; i < stackConfigs.length; i++) {
@@ -32,7 +32,8 @@ try {
       }
       const outputFilePath = `${baseName}_${stackConfigs[i]}.nii`
       await fs.writeFile(outputFilePath, Buffer.from(niftiImage))
-      console.log(`Converted to ${outputFilePath} in ${elapsedTime.toFixed(2)} ms`)
+      console.log(`Converted to ${outputFilePath}${elapsedTimeStr}`)
+      elapsedTimeStr = ''
     }
   }
 } catch (error) {
