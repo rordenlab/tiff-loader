@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { tiff2nii } from './lib/loader.js'
+import { tiff2niiStack } from './lib/loader.js'
 import * as fs from 'fs/promises'
 import path from 'path'
 import { performance } from 'perf_hooks'
@@ -15,11 +15,26 @@ try {
   await fs.access(filePath)
   const fileBuffer = await fs.readFile(filePath)
   const startTime = performance.now()
-  const niidata = await tiff2nii(fileBuffer, true)
+  const isVerbose = true
+  let { niftiImage, stackConfigs } = await tiff2niiStack(fileBuffer, isVerbose, 0)
   const elapsedTime = performance.now() - startTime
-  const outputFilePath = filePath.replace(/\.(lsm|tiff|tif)$/i, '.nii')
-  await fs.writeFile(outputFilePath, Buffer.from(niidata))
-  console.log(`Converted to ${outputFilePath} in ${elapsedTime.toFixed(2)} ms`)
+  // Get base filename without extension
+  const baseName = path.join(path.dirname(filePath), path.basename(filePath, path.extname(filePath)))
+  if (stackConfigs.length < 2) {
+    const outputFilePath = `${baseName}.nii`
+    await fs.writeFile(outputFilePath, Buffer.from(niftiImage))
+    console.log(`Converted to ${outputFilePath} in ${elapsedTime.toFixed(2)} ms`)
+  } else {
+    // Handle multiple stacks by saving each stack with an appended name
+    for (let i = 0; i < stackConfigs.length; i++) {
+      if (i > 0) {
+        ;({ niftiImage } = await tiff2niiStack(fileBuffer, isVerbose, i))
+      }
+      const outputFilePath = `${baseName}_${stackConfigs[i]}.nii`
+      await fs.writeFile(outputFilePath, Buffer.from(niftiImage))
+      console.log(`Converted to ${outputFilePath} in ${elapsedTime.toFixed(2)} ms`)
+    }
+  }
 } catch (error) {
   console.error(`Error: ${error.message}`)
   process.exit(1)

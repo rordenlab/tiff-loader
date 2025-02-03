@@ -6,6 +6,8 @@ The Tagged Image File Format became popular in miscroscopy for its ability to in
 
 The Tagged Image File Format [(TIFF)](https://paulbourke.net/dataformats/tiff/) has become widely used in microscopy due to its support for high-precision imaging (e.g., 16-bit depth) and custom metadata tags that capture essential scanning parameters.
 
+A challenge is that a single TIFF file can contain 2D images of different size and bit-depth. In contrast, NIfTI requires that all slices in a file have identical dimensions. Using [ImageJ terminology](https://imagej.net/ij/docs/guide/146-8.html#toc-Section-8) we refer to all the 2D slices that share dimensions as a `stack`, and a TIFF file that has multiple stacks as a `hyperstack`. To handle this, the included `loader.js` includes two functions: `tiff2nii()` always returns the first stack in a TIFF image. In contrast, `tiff2niiStack()` returns one stack (by default the first) and listing of all the stacks in an image. Through successive calls to `tiff2niiStack()`, one can sequentially convert all the stacks in a hyperstack to separate NIfTI images. The `tiff2nii` demo program illustrates this.
+
 Various microscopy tools extend the TIFF format with their own metadata conventions:
 
 - Leica LSM (Laser Scanning Microscope) images are based on TIFF but incorporate custom metadata and extensions specific to Leica confocal microscopy.
@@ -17,7 +19,7 @@ Since different software tools define their own TIFF metadata conventions, compa
 
 ## Local Development
 
-This converter can be run from the command line using node.js:
+To illustrate this library, `tiff2nii` is a node.js converter that can be run from the command line:
 
 ```
 git clone git@github.com:rordenlab/tiff-loader.git
@@ -26,9 +28,15 @@ npm install
 node ./src/tiff2nii.js ./tests/testData/shapes_deflate.tif
 ```
 
+Note that Python equivalents (`tiff2nii.py` uses [imio](https://github.com/brainglobe/imio); `tiff2nii2.py` uses tifffile and nibabel). However, the Python converters are unaware of the tags used by ImageJ, LSM and OME. Therefore, these fail to correctly detect and order images based on slice, timing and channels, nor do they provide information about the [physical size](https://brainder.org/2012/09/23/the-nifti-file-format/).
+
 ## Local Browser Development
 
+You can also embed this loader into a hot-reloadable NiiVue web page to evaluate integration:
+
 ```
+git clone git@github.com:rordenlab/tiff-loader.git
+cd tiff-loader
 npm install
 npm run dev
 ```

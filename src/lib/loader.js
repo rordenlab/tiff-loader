@@ -162,7 +162,7 @@ function parseLSMInfo(uint8Array) {
   return lsmInfo
 }
 
-export async function tiff2nii(inBuffer, isVerbose = false) {
+export async function tiff2niiStack(inBuffer, isVerbose = false, stackGroup = 0) {
   try {
     // Load the TIFF using geotiff.js
     let arrayBuffer = inBuffer
@@ -181,16 +181,41 @@ export async function tiff2nii(inBuffer, isVerbose = false) {
     const tiff = await fromArrayBuffer(arrayBuffer)
     // Read all 2D slices
     let nFrames = await tiff.getImageCount()
-    const images = []
+    let images = []
+    const stackGroups = new Array(nFrames).fill(0) // Default group is 0
+    let stackConfigs = [] // Store unique slice configurations as an array
     for (let i = 0; i < nFrames; i++) {
-      images.push(await tiff.getImage(i))
+      const img = await tiff.getImage(i)
+      images.push(img)
+      const width = img.getWidth()
+      const height = img.getHeight()
+      const samplesPerPixel = img.getSamplesPerPixel()
+      const bitDepth = img.getBytesPerPixel() * 8
+      // Create a unique key for this configuration
+      const configKey = `${width}x${height}c${samplesPerPixel}b${bitDepth}`
+      let configIndex = stackConfigs.indexOf(configKey)
+      if (configIndex === -1) {
+        stackConfigs.push(configKey)
+        configIndex = stackConfigs.length - 1 // New index
+      }
+      // Assign the group index to this slice
+      stackGroups[i] = configIndex
     }
+    //read meta data from first TIFF directory, prior to culling slice groupsS
+    const metadata = images[0].getFileDirectory()
+    if (stackConfigs.length > 0) {
+      if (stackGroup >= stackConfigs.length || stackGroup < 0) stackGroup = 0
+      images = images.filter((_, i) => stackGroups[i] === stackGroup)
+      if (isVerbose) {
+        console.log(`${images.length} of ${nFrames} slices match dimensions of stackGroup ${stackGroup}`)
+      }
+      nFrames = images.length
+    }
+    const width = images[0].getWidth()
+    const height = images[0].getHeight()
+    let samplesPerPixel = images[0].getSamplesPerPixel()
+    const bitDepth = images[0].getBytesPerPixel() * 8
     //we will convert all 2D slices that match the shape of the first
-    const image0 = images[0]
-    const width = image0.getWidth()
-    const height = image0.getHeight()
-    let samplesPerPixel = image0.getSamplesPerPixel()
-    const bitDepth = image0.getBytesPerPixel() * 8
     let sizeZ = 1 //slices
     let sizeT = 1 //timepoints
     let sizeC = 1 //channels
@@ -203,7 +228,6 @@ export async function tiff2nii(inBuffer, isVerbose = false) {
     hdr.magic = 'n+1'
     hdr.pixDims = [1, 1, 1, 1, 1, 0, 0, 0]
     // for ImageJ and OME: header values stored in ImageDescription
-    const metadata = image0.getFileDirectory()
     // Read LSM header
     // since geotiff does not have a name for tag 34412, it explicitly calls it "undefined"
     //  we can still identify it from the first four bytes "MagicNumber"
@@ -226,32 +250,66 @@ export async function tiff2nii(inBuffer, isVerbose = false) {
       sizeC = hdrLSM.DimensionChannels
       isLSM = true
       if (nFrames !== sizeZ * sizeT * sizeC) {
-        console.log(hdrLSM)
-        console.log(`Inconsistent LSM TIFF ${sizeZ}×${sizeT}×${sizeC} != ${nFrames} (perhaps multi-dimensional)`)
-        console.log(`${width}×${height}c${samplesPerPixel}bpp${bitDepth}`)
+        if (nFrames === sizeZ * sizeT) {
+          //each channel has unique resolution, hence its own slice group
+          sizeC = 1
+        } else {
+          console.log(hdrLSM)
+          console.log(`Inconsistent LSM TIFF ${sizeZ}×${sizeT}×${sizeC} != ${nFrames} (perhaps multi-dimensional)`)
+          console.log(`${width}×${height}c${samplesPerPixel}bpp${bitDepth}`)
+        }
       }
     }
     const imageDescription = metadata.ImageDescription
+    let isSliceOrderSequential = true
+    let sliceOrder = new Array(nFrames)
+    for (let i = 0; i < nFrames; i++) sliceOrder[i] = i
     //ImageJ meta data
     if (imageDescription?.includes('ImageJ=')) {
-      const slicesMatch = imageDescription.match(/slices=(\d+)/)
-      const framesMatch = imageDescription.match(/frames=(\d+)/)
+      const zMatch = imageDescription.match(/slices=(\d+)/)
+      const tMatch = imageDescription.match(/frames=(\d+)/)
+      const cMatch = imageDescription.match(/channels=(\d+)/)
       const spacingMatch = imageDescription.match(/spacing=([\d.]+)/)
       const unitMatch = imageDescription.match(/unit=([\S]+)/)
-      sizeZ = slicesMatch ? parseInt(slicesMatch[1], 10) : 1
-      sizeT = framesMatch ? parseInt(framesMatch[1], 10) : 1
+      sizeZ = zMatch ? parseInt(zMatch[1], 10) : 1
+      sizeT = tMatch ? parseInt(tMatch[1], 10) : 1
+      sizeC = cMatch ? parseInt(cMatch[1], 10) : 1
       const spacing = spacingMatch ? parseFloat(spacingMatch[1]) : 1.0
       hdr.pixDims[1] = spacing
       hdr.pixDims[2] = spacing
       hdr.pixDims[3] = spacing
       const unit = unitMatch ? unitMatch[1] : ''
       const isUm = ['µm', '\xB5m', '�m'].includes(unit)
+      console.log(imageDescription)
       if (isUm) hdr.xyzt_units = 3
-    }
+      /*if ((nFrames > 1) && (sizeZ * sizeT * sizeC === nFrames)) {
+        //reorder so 5D data is X,Y, Space (z), Time (t), Channel (c)
+        const zIndex = imageDescription.indexOf("slices=");
+        const tIndex = imageDescription.indexOf("frames=");
+        const cIndex = imageDescription.indexOf("channels=");
+        let zStep = 1
+        if (zIndex > tIndex) zStep *= sizeT
+        if (zIndex > cIndex) zStep *= sizeC
+        let tStep = 1
+        if (tIndex > zIndex) tStep *= sizeZ
+        if (tIndex > cIndex) tStep *= sizeC
+        let cStep = 1
+        if (cIndex > zIndex) cStep *= sizeZ
+        if (cIndex > tIndex) cStep *= sizeT
+        // console.log(zStep, tStep, cStep)
+        for (let i = 0; i < nFrames; i++) {
+            let z = Math.floor(i / zStep) % sizeZ
+            let t = Math.floor(i / tStep) % sizeT
+            let c = Math.floor(i / cStep) % sizeC
+            let order = z + t * sizeZ + c * (sizeZ * sizeT)
+            if (order !== i) {
+                isSliceOrderSequential = false;
+            }
+            sliceOrder[i] = order;
+        }
+      }*/
+    } //if ImageJ
     //parse OME-tiff
-    let isSliceOrderSequential = true
-    let sliceOrder = new Array(nFrames)
-    for (let i = 0; i < nFrames; i++) sliceOrder[i] = i
     if (imageDescription?.includes('<OME xml')) {
       const parser = new DOMParser()
       const xmlDoc = parser.parseFromString(imageDescription, 'text/xml')
@@ -291,40 +349,6 @@ export async function tiff2nii(inBuffer, isVerbose = false) {
         }
       } // if multiple planes
     } //if isOME
-    //determine if any slices differ from the first
-    let nFramesTotal = nFrames
-    nFrames = 0
-    for (let i = 0; i < nFramesTotal; i++) {
-      const image = images[i]
-      const widthI = image.getWidth()
-      const heightI = image.getHeight()
-      let samplesPerPixelI = image.getSamplesPerPixel()
-      const bitDepthI = image.getBytesPerPixel() * 8
-      if (widthI === width && heightI === height && samplesPerPixelI === samplesPerPixel && bitDepthI === bitDepth) {
-        sliceOrder[i] = nFrames
-        nFrames++
-        continue
-      }
-      sliceOrder[i] = -1
-      if (i !== nFrames) {
-        continue //only report 1st mismatch
-      }
-      console.log(
-        `${i} Unable to stack all TIFF slices (dimensions vary): ${width}×${height}c${samplesPerPixel}bpp${bitDepth} vs ${widthI}×${heightI}c${samplesPerPixelI}bpp${bitDepthI}`
-      )
-    }
-    if (nFrames !== nFramesTotal) {
-      if (!isSliceOrderSequential) {
-        throw new Error(`Slice order is not sequential and slice dimensions vary`)
-      }
-      if (isLSM && sizeZ * sizeT * sizeC !== nFrames) {
-        if (sizeZ * sizeT === nFrames) {
-          sizeC = 1
-          console.log(`only copying first channel of LSM data`)
-        }
-      }
-      console.log(`converting ${nFrames} of ${nFramesTotal} slices`)
-    }
     //set dims
     hdr.dims = [3, width, height, nFrames, 0, 0, 0, 0]
     if (sizeZ * sizeT * sizeC === nFrames && sizeT * sizeC > 1 && nFrames > 1) {
@@ -380,9 +404,9 @@ export async function tiff2nii(inBuffer, isVerbose = false) {
       imgArray = new Uint8Array(nvox * samplesPerPixel)
     }
     // Read pixel data from each slice
-    for (let i = 0; i < nFramesTotal; i++) {
-      if (sliceOrder[i] < 0) {
-        continue //this slice differs in dimension from the first slice
+    for (let i = 0; i < nFrames; i++) {
+      if (sliceOrder[i] < 0 || sliceOrder[i] >= nFrames) {
+        throw new Error(`Fatal error`)
       }
       const image = images[i]
       //n.b. pools can improve performance https://geotiffjs.github.io/geotiff.js/
@@ -419,8 +443,17 @@ export async function tiff2nii(inBuffer, isVerbose = false) {
     odata.set(hdrBytes)
     odata.set(opad, hdrBytes.length)
     odata.set(img8, hdrBytes.length + opad.length)
-    return odata
+    return {
+      niftiImage: odata, // The NIfTI image as a Uint8Array
+      stackConfigs: stackConfigs // The list of unique stack configurations
+    }
   } catch (error) {
     console.error('Error reading TIFF file:', error.message)
   }
+}
+
+export async function tiff2nii(inBuffer, isVerbose = false) {
+  //this function only reads the first stack from a TIFF hyper stack
+  const { niftiImage, stackConfigs } = await tiff2niiStack(inBuffer, isVerbose, 0)
+  return niftiImage
 }
