@@ -31,7 +31,7 @@
   },
   "dependencies": {
     "geotiff": "^2.1.3",
-    "nifti-reader-js": "^0.6.8",
+    "nifti-reader-js": "^0.7.1",
     "xmldom": "^0.6.0"
   },
   "devDependencies": {
